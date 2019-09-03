@@ -1,0 +1,139 @@
+---
+title: "Practical Aspects of Predictive Models"
+author: 'Nick Hanewinckel, FSA, CERA, AVP and Actuary, HannoverRe'
+output:
+  pdf_document:
+    toc: true
+editor_options:
+  chunk_output_type: console
+---
+```{r setup, echo=FALSE, include=FALSE}
+library(data.table)
+library(ggplot2)
+library(caret)
+library(splines)
+library(knitr)
+library(kableExtra)
+```
+
+#Build a Simple Model
+
+We will use ILEC data.
+
+**Note to users**
+
+The path in the code below will not work on your computer. Please download and re-map if you'd like to play along at home. The ILEC data is available:
+
+http://cdn-files.soa.org/research/2009-15_Data_20180601.zip
+
+
+```{r, readILEC}
+
+pth <- 'H:/Mortality Research/ILEC_2009-15 Data 20180601.txt'
+dat <- fread(pth,stringsAsFactors = TRUE,nrows=1000000,check.names = TRUE)
+setnames(dat,'Number.of.Deaths','Deaths')
+setnames(dat,'Policies.Exposed','Exposure')
+dat <- dat[Exposure>0]
+summary(dat)
+set.seed(12345)
+ind <- createDataPartition(dat$Attained.Age,p=.3,list=FALSE)
+dat[,Set:='Training']
+dat[ind,Set:='Testing']
+
+```
+
+
+```{r simple model}
+
+mod1 <- glm(formula=Deaths~(bs(Attained.Age,knots = c(25,62)) + Duration + Smoker.Status)^2 + Face.Amount.Band,
+            offset=log(Exposure),family = poisson,data=dat[Set=='Training'])
+summary(mod1)
+
+dat[,ExpectedDeaths:=predict(mod1,newdata=dat,type='response')]
+```
+
+
+## But is this safe?
+
+```{r Safer Predict}
+dat[,.(minAttAge=min(Attained.Age),maxAttAge=max(Attained.Age)),by=Set]
+```
+
+This could have been very *unsafe* if our Testing set was outside our Training set range. Without spline specifications or a saved spline object, different range. Don't leave safety to chance!
+
+## Evaluate
+
+```{r Evaluate}
+dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set)]
+dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Gender)]
+dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Smoker.Status)]
+dat[Attained.Age %between% c(55,75),.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Attained.Age)][order(Attained.Age)]
+```
+
+### Even Better
+
+kableExtra gives pretty table formats!
+
+```{r Eval Better}
+
+kable(
+  dcast(dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Gender)],Gender ~ Set,value.var=c('AtoEcount','Exposure')),digits=3)
+kable(
+  dcast(dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Smoker.Status)],Smoker.Status ~ Set,value.var=c('AtoEcount','Exposure')),digits=3)
+kable(
+  dcast(dat[Attained.Age %between% c(55,75),.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Attained.Age)][order(Attained.Age)],Attained.Age ~ Set,value.var=c('AtoEcount','Exposure')),digits=3)
+```
+
+
+# So...What's wrong with my model?
+
+## Gender!
+
+Gender was never given as a variable, but is obviously crucial. Don't get so lost in the technical details that you forget your actuarial expertise!
+
+```{r Better Model}
+mod2 <- glm(formula=Deaths~(bs(Attained.Age,knots = c(25,62)) + Duration + Smoker.Status + Gender)^2 + Face.Amount.Band,
+            offset=log(Exposure),family = poisson,data=dat[Set=='Training'])
+summary(mod2)
+
+dat[,ExpectedDeaths:=predict(mod2,newdata=dat,type='response')]
+dcast(dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Gender)],Gender ~ Set,value.var=c('AtoEcount','Exposure'))
+dcast(dat[,.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Smoker.Status)],Smoker.Status ~ Set,value.var=c('AtoEcount','Exposure'))
+dcast(dat[Attained.Age %between% c(55,75),.(Exposure=sum(Exposure),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),by=.(Set,Attained.Age)][order(Attained.Age)],Attained.Age ~ Set,value.var=c('AtoEcount','Exposure'))
+```
+
+# Graphs with Count CI
+Simple example for 90% CI (5% each tail)
+
+```{r Graph Count}
+plotTable <- dat[Attained.Age %between% c(55,75),
+                 .(Exposure=sum(Exposure),ExpectedDeaths=sum(ExpectedDeaths),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),
+                 by=.(Set,Attained.Age)][order(Attained.Age)]
+
+plotTable[,upperCI:=qpois(p=.95,lambda=ExpectedDeaths,lower.tail = TRUE)/ExpectedDeaths]
+plotTable[,lowerCI:=qpois(p=.95,lambda=ExpectedDeaths,lower.tail = FALSE)/ExpectedDeaths]
+
+ggplot(data=plotTable,aes(x=Attained.Age,y=AtoEcount,ymin=lowerCI,ymax=upperCI)) + 
+  geom_point(aes(size=Exposure))+
+  geom_errorbar()+
+  facet_grid(Set~.)+
+  labs(title='A/E by Attained Age - Testing vs Training',
+       subtitle='90% CI')
+
+plotTable <- dat[Attained.Age %between% c(55,75),
+                 .(Exposure=sum(Exposure),ExpectedDeaths=sum(ExpectedDeaths),AtoEcount=sum(Deaths)/sum(ExpectedDeaths)),
+                 by=.(Set,Gender,Attained.Age)][order(Attained.Age)]
+
+plotTable[,upperCI:=qpois(p=.95,lambda=ExpectedDeaths,lower.tail = TRUE)/ExpectedDeaths]
+plotTable[,lowerCI:=qpois(p=.95,lambda=ExpectedDeaths,lower.tail = FALSE)/ExpectedDeaths]
+
+ggplot(data=plotTable,aes(x=Attained.Age,y=AtoEcount,ymin=lowerCI,ymax=upperCI,color=Gender)) + 
+  geom_point(aes(size=Exposure))+
+  geom_errorbar()+
+  facet_grid(Set~.)+
+  labs(title='A/E by Attained Age - Testing vs Training',
+       subtitle='90% CI')
+```
+
+
+
